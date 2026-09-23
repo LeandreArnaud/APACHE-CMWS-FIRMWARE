@@ -7,22 +7,23 @@ namespace {
 //
 // The eye responds logarithmically: a linear 0..100 ramp looks like
 // everything happens between 0 and 20 %. This table (gamma 2.2) maps
-// a percentage to a 0..255 duty cycle so that turning the pot feels
+// a percentage to a 0..100 duty cycle so that turning the pot feels
 // even. Any non-zero request maps to at least 1, so "barely on" never
-// silently becomes "off".
+// silently becomes "off". 73 of the 101 settings end up visually
+// distinct; the rest collapse at the bottom, where gamma is steepest.
 // -------------------------------------------------------------------
 const uint8_t kGamma[cfg::BRIGHTNESS_MAX + 1] = {
     0,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-    2,   2,   2,   3,   3,   4,   5,   5,   6,   7,
-    7,   8,   9,  10,  11,  12,  13,  14,  15,  17,
-   18,  19,  21,  22,  24,  25,  27,  29,  30,  32,
-   34,  36,  38,  40,  42,  44,  46,  48,  51,  53,
-   55,  58,  60,  63,  66,  68,  71,  74,  77,  80,
-   83,  86,  89,  92,  96,  99, 102, 106, 109, 113,
-  116, 120, 124, 128, 131, 135, 139, 143, 148, 152,
-  156, 160, 165, 169, 174, 178, 183, 188, 192, 197,
-  202, 207, 212, 217, 223, 228, 233, 238, 244, 249,
-  255
+    1,   1,   1,   1,   1,   2,   2,   2,   2,   3,
+    3,   3,   4,   4,   4,   5,   5,   6,   6,   7,
+    7,   8,   8,   9,   9,  10,  11,  11,  12,  13,
+   13,  14,  15,  16,  16,  17,  18,  19,  20,  21,
+   22,  23,  24,  25,  26,  27,  28,  29,  30,  31,
+   33,  34,  35,  36,  37,  39,  40,  41,  43,  44,
+   46,  47,  49,  50,  52,  53,  55,  56,  58,  60,
+   61,  63,  65,  66,  68,  70,  72,  74,  75,  77,
+   79,  81,  83,  85,  87,  89,  91,  94,  96,  98,
+  100
 };
 
 // -------------------------------------------------------------------
@@ -37,17 +38,25 @@ const uint8_t kGamma[cfg::BRIGHTNESS_MAX + 1] = {
 // on the F1 the LL_GPIO_PIN_x values are not 1 << n, they also encode
 // the pin's position inside CRL/CRH.
 // -------------------------------------------------------------------
-struct LedPin {
-  uint32_t mask      = 0;  // 1 << pin, ready for the low half of BSRR
-  uint8_t  portIndex = 0;  // index into s_port, resolved in begin()
+// LEDs are stored grouped by port, in one flat pair of arrays, and each
+// group points at a contiguous slice of them. A per-group 2D table would
+// have to be sized LED_COUNT x LED_COUNT and would waste most of it:
+// there are only ever LED_COUNT entries in total, however they split.
+uint32_t s_bit[cfg::LED_COUNT]    = { 0 };  // BSRR bit of that LED
+uint8_t  s_dutyOf[cfg::LED_COUNT] = { 0 };  // its index in s_duty
+
+struct PortGroup {
+  GPIO_TypeDef* port    = nullptr;
+  uint32_t      allMask = 0;  // every LED bit on this port
+  uint8_t       first   = 0;  // slice start in s_bit / s_dutyOf
+  uint8_t       count   = 0;
 };
 
-// Upper bound: one distinct port per LED.
+// Upper bound: one distinct port per LED. Today it resolves to 2.
 constexpr uint8_t kMaxPorts = cfg::LED_COUNT;
 
-LedPin        s_pin[cfg::LED_COUNT];
-GPIO_TypeDef* s_port[kMaxPorts];  // distinct ports used (PA and PB today)
-uint8_t       s_portCount = 0;
+PortGroup s_group[kMaxPorts];
+uint8_t   s_groupCount = 0;
 
 // Requested brightness per LED, and the global scale, both in percent.
 uint8_t s_percent[cfg::LED_COUNT] = { 0 };
@@ -59,7 +68,7 @@ uint8_t s_master = cfg::BRIGHTNESS_MAX;
 uint8_t s_lastMask  = 0;
 bool    s_maskKnown = false;
 
-// Gamma-corrected duty actually used by the ISR, 0..255.
+// Gamma-corrected duty actually used by the ISR, 0..PWM_LEVELS.
 // Written from loop() context, read from the ISR: a byte store is
 // atomic on Cortex-M3, so no critical section is needed.
 volatile uint8_t s_duty[cfg::LED_COUNT] = { 0 };
@@ -85,23 +94,31 @@ void recomputeAll() {
 // -------------------------------------------------------------------
 // PWM interrupt.
 //
-// One uint8_t counter wrapping on its own gives 256 duty steps.
-// Two register stores drive all six LEDs.
+// The counter walks 0..PWM_LEVELS-1, so one tick is one percent of
+// duty cycle. Two register stores drive all six LEDs.
 // -------------------------------------------------------------------
 void onPwmTick() {
   static uint8_t counter = 0;
-  counter++;
-
-  uint32_t bsrr[kMaxPorts] = { 0 };
-
-  for (uint8_t i = 0; i < cfg::LED_COUNT; i++) {
-    const bool on = (counter < s_duty[i]);
-    // Set = low half of BSRR, clear = high half.
-    bsrr[s_pin[i].portIndex] |= on ? s_pin[i].mask : (s_pin[i].mask << 16);
+  if (++counter >= cfg::PWM_LEVELS) {
+    counter = 0;
   }
 
-  for (uint8_t p = 0; p < s_portCount; p++) {
-    s_port[p]->BSRR = bsrr[p];
+  for (uint8_t g = 0; g < s_groupCount; g++) {
+    const PortGroup& grp = s_group[g];
+    const uint8_t    end = grp.first + grp.count;
+
+    // Collect the LEDs of this port that should be lit right now...
+    uint32_t on = 0;
+    for (uint8_t j = grp.first; j < end; j++) {
+      if (counter < s_duty[s_dutyOf[j]]) {
+        on |= s_bit[j];
+      }
+    }
+
+    // ...and write the whole port in one atomic store: low half sets,
+    // high half clears. Everything of ours that is not "on" is "off",
+    // so the clear mask costs nothing to derive.
+    grp.port->BSRR = on | ((grp.allMask & ~on) << 16);
   }
 }
 
@@ -109,31 +126,60 @@ void onPwmTick() {
 
 namespace Leds {
 
+// Resolves an LED index to its GPIO port and its BSRR bit.
+void resolvePin(uint8_t index, GPIO_TypeDef*& port, uint32_t& bit) {
+  const PinName name = digitalPinToPinName(cfg::PIN_LED[index]);
+  port = get_GPIO_Port(STM_PORT(name));
+  bit  = STM_GPIO_PIN(name);
+}
+
 void begin() {
-  s_portCount = 0;
+  s_groupCount = 0;
 
+  // Pass 1: configure the pins and collect the distinct ports.
   for (uint8_t i = 0; i < cfg::LED_COUNT; i++) {
-    const uint32_t pin = cfg::PIN_LED[i];
-
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);
-
-    const PinName       name = digitalPinToPinName(pin);
-    GPIO_TypeDef* const port = get_GPIO_Port(STM_PORT(name));
-
-    s_pin[i].mask = STM_GPIO_PIN(name);
-
-    // Resolve the port to an index now, so the ISR never searches.
-    uint8_t index = 0;
-    while (index < s_portCount && s_port[index] != port) {
-      index++;
-    }
-    if (index == s_portCount) {
-      s_port[s_portCount++] = port;
-    }
-    s_pin[i].portIndex = index;
-
+    pinMode(cfg::PIN_LED[i], OUTPUT);
+    digitalWrite(cfg::PIN_LED[i], LOW);
     s_percent[i] = 0;
+
+    GPIO_TypeDef* port = nullptr;
+    uint32_t      bit  = 0;
+    resolvePin(i, port, bit);
+
+    uint8_t g = 0;
+    while (g < s_groupCount && s_group[g].port != port) {
+      g++;
+    }
+    if (g == s_groupCount) {
+      s_group[s_groupCount++].port = port;
+    }
+  }
+
+  // Pass 2: lay the LEDs out grouped by port, so the ISR walks a
+  // contiguous slice and never searches.
+  uint8_t next = 0;
+  for (uint8_t g = 0; g < s_groupCount; g++) {
+    PortGroup& grp = s_group[g];
+    grp.first   = next;
+    grp.count   = 0;
+    grp.allMask = 0;
+
+    for (uint8_t i = 0; i < cfg::LED_COUNT; i++) {
+      GPIO_TypeDef* port = nullptr;
+      uint32_t      bit  = 0;
+      resolvePin(i, port, bit);
+
+      if (port != grp.port) {
+        continue;
+      }
+
+      s_bit[next]    = bit;
+      s_dutyOf[next] = i;
+      next++;
+
+      grp.count++;
+      grp.allMask |= bit;
+    }
   }
 
   recomputeAll();

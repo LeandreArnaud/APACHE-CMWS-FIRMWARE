@@ -96,18 +96,20 @@ constexpr uint16_t POT_DEADBAND = 24;
 // Software PWM
 // ---------------------------------------------------------------------
 
-// The public brightness API is in percent; internally the duty cycle
-// has 256 steps, because the ISR counter is a uint8_t that wraps on its
-// own - no compare, no reset branch.
+// Brightness is expressed in percent everywhere, and the duty cycle
+// has the same 100 steps - one counter tick is one percent.
+//
+// 256 steps were measured and dropped: they need a 32 kHz tick, which
+// costs ~8.4 % of the CPU against 2.6 % here, and buy only 88 visually
+// distinct settings instead of 73. Not worth 3x the interrupt rate.
 constexpr uint8_t BRIGHTNESS_MAX = 100;
+constexpr uint8_t PWM_LEVELS     = 100;
 
-// 32000 / 256 = 125 Hz refresh. The legacy firmware ran 100 levels at
-// 10 kHz (100 Hz); 256 steps are what makes the gamma table usable,
-// since gamma spends most of its resolution at the bottom of the range.
-// At 32 kHz there are 2250 CPU cycles between ticks and the ISR needs
-// well under a hundred - which is exactly why it writes BSRR instead of
-// calling digitalWrite six times (that alone would be ~250 cycles).
-constexpr uint32_t PWM_TICK_HZ = 32000;
+// 10000 / 100 = 100 Hz refresh, same as the legacy firmware. The ISR
+// costs about 190 cycles out of the 7200 available between two ticks,
+// because it writes BSRR once per port instead of calling digitalWrite
+// six times (that alone would be ~250 cycles).
+constexpr uint32_t PWM_TICK_HZ = 10000;
 
 // The core defaults timer interrupts to priority 14, which is below the
 // I2C interrupt (priority 2). That lets an OLED refresh preempt the PWM
