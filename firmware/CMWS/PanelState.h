@@ -18,15 +18,15 @@
 // PanelInputs is what will be sent to the game.
 // =====================================================================
 
-// Position of the 3-position mode switch.
+// Position of the OFF / ON / TEST rotary.
 //
-// Unknown is not a defensive extra: a real 3-position switch passes
-// through a dead zone between detents where no contact is closed. The
-// legacy sketch silently treated that as "on".
+// Unknown is not a defensive extra: a real rotary passes through a dead
+// zone between detents where no contact is closed. The legacy sketch
+// silently treated that as "on".
 enum class ModeSwitch : uint8_t {
   Off,
-  Standby,
   On,
+  Test,
   Unknown
 };
 
@@ -36,8 +36,8 @@ struct PanelInputs {
   uint8_t    switchesChanged = 0;   // bit i = switch i changed on this poll
   ModeSwitch mode            = ModeSwitch::Unknown;
   bool       modeChanged     = false;
-  uint16_t   potBrightness   = 0;   // smoothed, 0..4095
-  uint16_t   potAux          = 0;   // smoothed, 0..4095 - no consumer yet
+  uint16_t   potBrightness   = 0;   // LAMP pot, smoothed, 0..4095
+  uint16_t   potAux          = 0;   // AUDIO pot, smoothed, 0..4095
 };
 
 // What the panel displays.

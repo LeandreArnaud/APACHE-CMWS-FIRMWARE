@@ -70,13 +70,13 @@ struct SmoothedPot {
 
 PanelInputs  s_state;
 DebouncedPin s_switch[cfg::SWITCH_COUNT];
-DebouncedPin s_mode[3];   // Off, Standby, On - same order as kModePin
+DebouncedPin s_mode[3];   // Off, On, Test - same order as kModePin
 SmoothedPot  s_potBrightness;
 SmoothedPot  s_potAux;
 uint32_t     s_lastPollMs = 0;
 
 const uint32_t kModePin[3] = {
-  cfg::PIN_MODE_OFF, cfg::PIN_MODE_STANDBY, cfg::PIN_MODE_ON
+  cfg::PIN_MODE_OFF, cfg::PIN_MODE_ON, cfg::PIN_MODE_TEST
 };
 
 // Decodes the three debounced mode contacts. Exactly one closed is a
@@ -99,8 +99,8 @@ ModeSwitch decodeMode() {
 
   switch (closedIndex) {
     case 0:  return ModeSwitch::Off;
-    case 1:  return ModeSwitch::Standby;
-    default: return ModeSwitch::On;
+    case 1:  return ModeSwitch::On;
+    default: return ModeSwitch::Test;
   }
 }
 
